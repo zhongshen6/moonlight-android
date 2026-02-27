@@ -181,6 +181,65 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
     private TextView performanceOverlayBig;
 
+    private TextView touchDebugOverlay;
+
+    private long touchInputEventCount;
+    private long touchInputMoveCount;
+    private long touchInputHistoryCount;
+    private long touchSendEventCount;
+    private long touchSendFailCount;
+    private long touchSendUnsupportedCount;
+    private long touchLastInputEventTime = -1;
+    private long touchLastInputGapMs;
+    private int touchLastPointerCount;
+
+    private long touchSnapshotTimeMs;
+    private long touchSnapshotInputEventCount;
+    private long touchSnapshotSendEventCount;
+
+    private final Runnable touchDebugOverlayUpdater = new Runnable() {
+        @Override
+        public void run() {
+            if (touchDebugOverlay == null) {
+                return;
+            }
+
+            long now = android.os.SystemClock.elapsedRealtime();
+            if (touchSnapshotTimeMs == 0) {
+                touchSnapshotTimeMs = now;
+            }
+
+            long elapsedMs = Math.max(1, now - touchSnapshotTimeMs);
+            long inputDelta = touchInputEventCount - touchSnapshotInputEventCount;
+            long sendDelta = touchSendEventCount - touchSnapshotSendEventCount;
+
+            double inputRate = inputDelta * 1000.0 / elapsedMs;
+            double sendRate = sendDelta * 1000.0 / elapsedMs;
+
+            String text = String.format(Locale.US,
+                    "TouchMon\nmode=%s\nin=%d (%.1f/s) send=%d (%.1f/s)\nmove=%d history=%d fail=%d unsup=%d\nlastGap=%dms ptr=%d",
+                    prefConfig.enableMultiTouchScreen ? "multi-touch" : (prefConfig.touchscreenTrackpad ? "trackpad" : "mouse"),
+                    touchInputEventCount,
+                    inputRate,
+                    touchSendEventCount,
+                    sendRate,
+                    touchInputMoveCount,
+                    touchInputHistoryCount,
+                    touchSendFailCount,
+                    touchSendUnsupportedCount,
+                    touchLastInputGapMs,
+                    touchLastPointerCount);
+            touchDebugOverlay.setText(text);
+            touchDebugOverlay.setVisibility(View.VISIBLE);
+
+            touchSnapshotTimeMs = now;
+            touchSnapshotInputEventCount = touchInputEventCount;
+            touchSnapshotSendEventCount = touchSendEventCount;
+
+            touchDebugOverlay.postDelayed(this, 1000);
+        }
+    };
+
     private MediaCodecDecoderRenderer decoderRenderer;
     private boolean reportedCrash;
 
@@ -356,6 +415,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         performanceOverlayLite = findViewById(R.id.performanceOverlayLite);
 
         performanceOverlayBig = findViewById(R.id.performanceOverlayBig);
+
+        touchDebugOverlay = findViewById(R.id.touchDebugOverlay);
+        touchDebugOverlay.removeCallbacks(touchDebugOverlayUpdater);
+        touchDebugOverlay.post(touchDebugOverlayUpdater);
 
         inputCaptureProvider = InputCaptureManager.getInputCaptureProvider(this, this);
 
@@ -1259,6 +1322,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     protected void onDestroy() {
         super.onDestroy();
 
+        if (touchDebugOverlay != null) {
+            touchDebugOverlay.removeCallbacks(touchDebugOverlayUpdater);
+        }
+
         instance = null;
 
         if(presentation!=null){
@@ -2093,11 +2160,18 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     private boolean sendTouchEventForPointer(View view, MotionEvent event, byte eventType, int pointerIndex) {
         float[] normalizedCoords = getStreamViewRelativeNormalizedXY(view, event, pointerIndex,true);
         float[] normalizedContactArea = getStreamViewNormalizedContactArea(event, pointerIndex);
-        return conn.sendTouchEvent(eventType, event.getPointerId(pointerIndex),
+        int ret = conn.sendTouchEvent(eventType, event.getPointerId(pointerIndex),
                 normalizedCoords[0], normalizedCoords[1],
                 getPressureOrDistance(event, pointerIndex),
                 normalizedContactArea[0], normalizedContactArea[1],
-                getRotationDegrees(event, pointerIndex)) != MoonBridge.LI_ERR_UNSUPPORTED;
+                getRotationDegrees(event, pointerIndex));
+
+        touchSendEventCount++;
+        if (ret == MoonBridge.LI_ERR_UNSUPPORTED) {
+            touchSendUnsupportedCount++;
+        }
+
+        return ret != MoonBridge.LI_ERR_UNSUPPORTED;
     }
 
     private boolean trySendTouchEvent(View view, MotionEvent event) {
@@ -2117,9 +2191,16 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         }
         else if (event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
             // Cancel impacts all active pointers
-            return conn.sendTouchEvent(MoonBridge.LI_TOUCH_EVENT_CANCEL_ALL, 0,
+            int ret = conn.sendTouchEvent(MoonBridge.LI_TOUCH_EVENT_CANCEL_ALL, 0,
                     0, 0, 0, 0, 0,
-                    MoonBridge.LI_ROT_UNKNOWN) != MoonBridge.LI_ERR_UNSUPPORTED;
+                    MoonBridge.LI_ROT_UNKNOWN);
+
+            touchSendEventCount++;
+            if (ret == MoonBridge.LI_ERR_UNSUPPORTED) {
+                touchSendUnsupportedCount++;
+            }
+
+            return ret != MoonBridge.LI_ERR_UNSUPPORTED;
         }
         else {
             // Up, Down, and Hover events are specific to the action index
@@ -2410,6 +2491,9 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                         // send it directly as a touch event.
                         return true;
                     }
+                    if (!prefConfig.touchscreenTrackpad) {
+                        touchSendFailCount++;
+                    }
                 }
 
                 int actionIndex = event.getActionIndex();
@@ -2592,6 +2676,19 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     @SuppressLint("ClickableViewAccessibility")
     @Override
     public boolean onTouch(View view, MotionEvent event) {
+        long eventTime = event.getEventTime();
+        if (touchLastInputEventTime > 0 && eventTime >= touchLastInputEventTime) {
+            touchLastInputGapMs = eventTime - touchLastInputEventTime;
+        }
+        touchLastInputEventTime = eventTime;
+        touchLastPointerCount = event.getPointerCount();
+        touchInputEventCount++;
+
+        if (event.getActionMasked() == MotionEvent.ACTION_MOVE) {
+            touchInputMoveCount++;
+            touchInputHistoryCount += event.getHistorySize();
+        }
+
         if (event.getAction() == MotionEvent.ACTION_DOWN) {
             // Tell the OS not to buffer input events for us
             //

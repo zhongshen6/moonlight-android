@@ -50,6 +50,21 @@
         android:preferKeepClear="true"
         android:visibility="gone" />
 
+    <TextView
+        android:id="@+id/touchDebugOverlay"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_marginEnd="8dp"
+        android:layout_marginBottom="8dp"
+        android:background="#A0000000"
+        android:padding="6dp"
+        android:text="Touch debug"
+        android:textAppearance="?android:attr/textAppearanceSmall"
+        android:textSize="10sp"
+        android:visibility="gone"
+        tools:visibility="visible" />
+
     <LinearLayout
         android:id="@+id/performanceOverlay"
         android:orientation="vertical"
